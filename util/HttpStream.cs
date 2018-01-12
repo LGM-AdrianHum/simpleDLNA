@@ -1,39 +1,39 @@
-﻿using log4net;
-using System;
+﻿using System;
 using System.IO;
 using System.Net;
 using System.Reflection;
+using log4net;
 
 namespace NMaier.SimpleDlna.Utilities
 {
   public class HttpStream : Stream, IDisposable
   {
-    private const int BUFFER_SIZE = 1 << 16;
+    private const int BUFFER_SIZE = 1 << 10;
 
-    private const long SMALL_SEEK = BUFFER_SIZE << 15;
+    private const long SMALL_SEEK = 1 << 9;
 
     private const int TIMEOUT = 30000;
+
+    private static readonly ILog logger =
+      LogManager.GetLogger(typeof (HttpStream));
+
+    public static readonly string UserAgent = GenerateUserAgent();
+
+    private readonly Uri referrer;
+
+    private readonly Uri uri;
 
     private Stream bufferedStream;
 
     private long? length;
 
-    private readonly static ILog logger =
-      LogManager.GetLogger(typeof(HttpStream));
-
-    public static readonly string UserAgent = GenerateUserAgent();
-
-    private long position = 0;
-
-    private readonly Uri referrer;
+    private long position;
 
     private HttpWebRequest request;
 
     private HttpWebResponse response;
 
     private Stream responseStream;
-
-    private readonly Uri uri;
 
     public HttpStream(Uri uri)
       : this(uri, null)
@@ -43,81 +43,54 @@ namespace NMaier.SimpleDlna.Utilities
     public HttpStream(Uri uri, Uri referrer)
     {
       if (uri == null) {
-        throw new ArgumentNullException("uri");
+        throw new ArgumentNullException(nameof(uri));
       }
       this.uri = uri;
       this.referrer = referrer;
     }
 
-    public override bool CanRead
-    {
-      get
-      {
-        return true;
-      }
-    }
+    public override bool CanRead => true;
 
     public override bool CanSeek
     {
-      get
-      {
-        if (response == null) {
-          OpenAt(0, HttpMethod.HEAD);
-        }
+      get {
         if (Length <= 0) {
           return false;
         }
+
+        EnsureResponse();
         var ranges = response.Headers.Get("Accept-Ranges");
         if (!string.IsNullOrEmpty(ranges) &&
-          ranges.ToUpperInvariant() == "none") {
+            ranges.ToUpperInvariant() == "none") {
           return false;
         }
         return true;
       }
     }
 
-    public override bool CanTimeout
-    {
-      get
-      {
-        return true;
-      }
-    }
+    public override bool CanTimeout => true;
 
-    public override bool CanWrite
-    {
-      get
-      {
-        return false;
-      }
-    }
+    public override bool CanWrite => false;
 
     public string ContentType
     {
-      get
-      {
-        if (response == null) {
-          OpenAt(0, HttpMethod.HEAD);
-        }
+      get {
+        EnsureResponse();
         return response.ContentType;
       }
     }
 
     public DateTime LastModified
     {
-      get
-      {
-        if (response == null) {
-          OpenAt(0, HttpMethod.HEAD);
-        }
+      get {
+        EnsureResponse();
         return response.LastModified;
       }
     }
 
     public override long Length
     {
-      get
-      {
+      get {
         if (!length.HasValue) {
           OpenAt(0, HttpMethod.HEAD);
           length = response.ContentLength;
@@ -131,39 +104,41 @@ namespace NMaier.SimpleDlna.Utilities
 
     public override long Position
     {
-      get
-      {
-        return position;
-      }
-      set
-      {
-        Seek(Position, SeekOrigin.Begin);
-      }
+      get { return position; }
+      set { Seek(value, SeekOrigin.Begin); }
     }
 
-    public Uri Uri
+    public Uri Uri => new Uri(uri.ToString());
+
+    public new void Dispose()
     {
-      get
-      {
-        return new Uri(uri.ToString());
+      Dispose(true);
+      GC.SuppressFinalize(this);
+    }
+
+    private void EnsureResponse()
+    {
+      if (response != null) {
+        return;
       }
+      OpenAt(0, HttpMethod.HEAD);
     }
 
     private static string GenerateUserAgent()
     {
       var os = Environment.OSVersion;
-      var pstring = os.Platform.ToString();
+      string pstring;
       switch (os.Platform) {
-        case PlatformID.Win32NT:
-        case PlatformID.Win32S:
-        case PlatformID.Win32Windows:
-          pstring = "WIN";
-          break;
-        default:
-          pstring = "Unix";
-          break;
+      case PlatformID.Win32NT:
+      case PlatformID.Win32S:
+      case PlatformID.Win32Windows:
+        pstring = "WIN";
+        break;
+      default:
+        pstring = "Unix";
+        break;
       }
-      return String.Format(
+      return string.Format(
         "sdlna/{4}.{5} ({0}{1} {2}.{3}) like curl/7.3 like wget/1.0",
         pstring,
         IntPtr.Size * 8,
@@ -218,42 +193,32 @@ namespace NMaier.SimpleDlna.Utilities
       response = (HttpWebResponse)request.GetResponse();
       if (method != HttpMethod.HEAD) {
         responseStream = response.GetResponseStream();
+        if (responseStream == null) {
+          throw new IOException("Didn't get a response stream");
+        }
         bufferedStream = new BufferedStream(responseStream, BUFFER_SIZE);
       }
       if (offset > 0 && response.StatusCode != HttpStatusCode.PartialContent) {
         throw new IOException(
           "Failed to open the http stream at a specific position");
       }
-      else {
-        if (offset == 0 && response.StatusCode != HttpStatusCode.OK) {
-          throw new IOException("Failed to open the http stream");
-        }
+      if (offset == 0 && response.StatusCode != HttpStatusCode.OK) {
+        throw new IOException("Failed to open the http stream");
       }
       logger.InfoFormat("Opened {0} {1} at {2}", method, uri, offset);
     }
 
     public override void Close()
     {
-      if (bufferedStream != null) {
-        bufferedStream.Close();
-      }
-      if (responseStream != null) {
-        responseStream.Close();
-      }
-      if (response != null) {
-        response.Close();
-      }
+      bufferedStream?.Close();
+      responseStream?.Close();
+      response?.Close();
       base.Close();
-    }
-
-    public new void Dispose()
-    {
-      Dispose(true);
-      GC.SuppressFinalize(this);
     }
 
     public override void Flush()
     {
+      Dispose(true);
     }
 
     public override int Read(byte[] buffer, int offset, int count)
@@ -279,15 +244,15 @@ namespace NMaier.SimpleDlna.Utilities
       logger.DebugFormat("Seek to {0}, {1} requested", offset, origin);
       var np = 0L;
       switch (origin) {
-        case SeekOrigin.Begin:
-          np = offset;
-          break;
-        case SeekOrigin.Current:
-          np = position + offset;
-          break;
-        case SeekOrigin.End:
-          np = Length + np;
-          break;
+      case SeekOrigin.Begin:
+        np = offset;
+        break;
+      case SeekOrigin.Current:
+        np = position + offset;
+        break;
+      case SeekOrigin.End:
+        np = Length + np;
+        break;
       }
       if (np < 0 || np >= Length) {
         throw new IOException("Invalid seek; out of stream bounds");

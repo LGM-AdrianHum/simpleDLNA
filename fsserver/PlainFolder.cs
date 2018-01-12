@@ -1,9 +1,9 @@
-using NMaier.SimpleDlna.Server;
-using NMaier.SimpleDlna.Server.Metadata;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using NMaier.SimpleDlna.Server;
+using NMaier.SimpleDlna.Server.Metadata;
 
 namespace NMaier.SimpleDlna.FileMediaServer
 {
@@ -11,89 +11,57 @@ namespace NMaier.SimpleDlna.FileMediaServer
   {
     private readonly DirectoryInfo dir;
 
-    private PlainFolder(FileServer server, DlnaMediaTypes types,
-                        VirtualFolder parent, DirectoryInfo dir,
-                        IEnumerable<string> exts)
+    internal PlainFolder(FileServer server, VirtualFolder parent, DirectoryInfo dir)
       : base(parent, dir.Name)
     {
       Server = server;
       this.dir = dir;
-      folders = (from d in dir.GetDirectories()
-                 let m = TryGetFolder(server, types, d)
-                 where m != null && m.ChildCount > 0
-                 select m as IMediaFolder).ToList();
-
       var rawfiles = from f in dir.GetFiles("*.*")
                      select f;
       var files = new List<BaseFile>();
       foreach (var f in rawfiles) {
         var ext = f.Extension;
         if (string.IsNullOrEmpty(ext) ||
-          !exts.Contains(ext.Substring(1), StringComparer.OrdinalIgnoreCase)) {
+            !server.Filter.Filtered(ext.Substring(1))) {
           continue;
         }
         try {
-          files.Add(server.GetFile(this, f));
+          var file = server.GetFile(this, f);
+          if (server.Allowed(file)) {
+            files.Add(file);
+          }
         }
         catch (Exception ex) {
           server.Warn(f, ex);
         }
       }
-      resources.AddRange(files);
+      Resources.AddRange(files);
+
+      Folders = (from d in dir.GetDirectories()
+                 let m = TryGetFolder(server, d)
+                 where m != null && m.ChildCount > 0
+                 select m as IMediaFolder).ToList();
     }
 
-    protected PlainFolder(FileServer server, DlnaMediaTypes types,
-                          VirtualFolder parent, DirectoryInfo dir)
-      : this(server, types, parent, dir, types.GetExtensions())
-    {
-    }
+    public override string Path => dir.FullName;
 
-    public DateTime InfoDate
-    {
-      get
-      {
-        return dir.LastWriteTimeUtc;
-      }
-    }
+    public FileServer Server { get; protected set; }
 
-    public long? InfoSize
-    {
-      get
-      {
-        return null;
-      }
-    }
+    public override string Title => dir.Name;
 
-    public override string Path
-    {
-      get
-      {
-        return dir.FullName;
-      }
-    }
+    public DateTime InfoDate => dir.LastWriteTimeUtc;
 
-    public FileServer Server
-    {
-      get;
-      protected set;
-    }
+    public long? InfoSize => null;
 
-    public override string Title
-    {
-      get
-      {
-        return dir.Name;
-      }
-    }
-
-    private PlainFolder TryGetFolder(FileServer server, DlnaMediaTypes types,
-                                     DirectoryInfo d)
+    private PlainFolder TryGetFolder(FileServer server, DirectoryInfo d)
     {
       try {
-        return new PlainFolder(server, types, this, d);
+        return new PlainFolder(server, this, d);
       }
       catch (Exception ex) {
-        server.Warn("Failed to access folder", ex);
+        if (!d.Name.Equals("System Volume Information")) {
+          server.Warn("Failed to access folder", ex);
+        }
         return null;
       }
     }
